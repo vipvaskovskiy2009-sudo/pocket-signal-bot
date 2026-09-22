@@ -1,8 +1,10 @@
 import os
 import json
 import time
+import threading
 import urllib.request
 import urllib.parse
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 TOKEN = os.environ["BOT_TOKEN"]
 API = f"https://api.telegram.org/bot{TOKEN}/"
@@ -13,15 +15,19 @@ PAIRS = {
     "USD/JPY": "USDJPY=X",
 }
 
+
 def api(method, data=None):
     url = API + method
+
     if data:
         data = urllib.parse.urlencode(data).encode()
         req = urllib.request.Request(url, data=data)
     else:
         req = urllib.request.Request(url)
+
     with urllib.request.urlopen(req, timeout=20) as r:
         return json.loads(r.read())
+
 
 def get_signal(symbol):
     url = (
@@ -53,6 +59,7 @@ def get_signal(symbol):
 
     return "⚪ ПРОПУСК"
 
+
 def keyboard():
     return json.dumps({
         "inline_keyboard": [
@@ -66,12 +73,14 @@ def keyboard():
         ]
     })
 
+
 def send(chat_id, text):
     api("sendMessage", {
         "chat_id": chat_id,
         "text": text,
         "reply_markup": keyboard()
     })
+
 
 def main():
     offset = 0
@@ -114,6 +123,7 @@ def main():
 
                     try:
                         signal = get_signal(PAIRS[pair])
+
                         send(
                             chat_id,
                             f"📊 {pair}\n\n"
@@ -121,6 +131,7 @@ def main():
                             "⚠️ Это технический сигнал, "
                             "не гарантия результата."
                         )
+
                     except Exception:
                         send(
                             chat_id,
@@ -132,5 +143,32 @@ def main():
         except Exception:
             time.sleep(5)
 
+
+class HealthHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header(
+            "Content-Type",
+            "text/plain; charset=utf-8"
+        )
+        self.end_headers()
+        self.wfile.write(b"Pocket Signal is running")
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_web_server():
+    port = int(os.environ.get("PORT", "10000"))
+    server = HTTPServer(("0.0.0.0", port), HealthHandler)
+    server.serve_forever()
+
+
 if __name__ == "__main__":
+    threading.Thread(
+        target=start_web_server,
+        daemon=True
+    ).start()
+
     main()
