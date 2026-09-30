@@ -1,21 +1,21 @@
 import os
 import time
 import requests
+import numpy as np
 import pandas as pd
-import pandas_ta as ta
 import yfinance as yf
 
 # ================= НАСТРОЙКИ =================
-TELEGRAM_BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"  # Вставьте токен от @BotFather
-TELEGRAM_CHAT_ID = "ВАШ_CHAT_ID"       # Вставьте ваш ID чата или канала
-SYMBOL = "EURUSD=X"                    # Валютная пара (EUR/USD)
-INTERVAL = "5m"                        # Таймфрейм свечей
-CHECK_INTERVAL = 300                   # Пауза между проверками (в секундах, 300 сек = 5 мин)
+TELEGRAM_BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"  # Токен от @BotFather
+TELEGRAM_CHAT_ID = "ВАШ_CHAT_ID"       # Ваш ID чата
+SYMBOL = "EURUSD=X"                    # Валютная пара
+INTERVAL = "5m"                        # Таймфрейм
+CHECK_INTERVAL = 300                   # Проверка каждые 5 минут
 # =============================================
 
 
 def send_telegram_message(message: str):
-    """Отправка сообщения в Telegram-чат."""
+    """Отправка сообщения в Telegram."""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -25,43 +25,90 @@ def send_telegram_message(message: str):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Ошибка отправки в Telegram: {e}")
+        print(f"Ошибка отправки сообщения: {e}")
+
+
+def calculate_rsi(series, period=14):
+    """Расчет индикатора RSI."""
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+
+def calculate_stochastic(df, k_period=14, d_period=3):
+    """Расчет осциллятора Stochastic."""
+    low_min = df['Low'].rolling(window=k_period).min()
+    high_max = df['High'].rolling(window=k_period).max()
+    stoch_k = 100 * ((df['Close'] - low_min) / (high_max - low_min))
+    stoch_d = stoch_k.rolling(window=d_period).mean()
+    return stoch_k, stoch_d
+
+
+def calculate_supertrend(df, period=10, multiplier=3):
+    """Расчет индикатора SuperTrend."""
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+
+    # ATR calculation
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(period).mean()
+
+    hl2 = (high + low) / 2
+    basic_upperband = hl2 + (multiplier * atr)
+    basic_lowerband = hl2 - (multiplier * atr)
+
+    upperband = basic_upperband.copy()
+    lowerband = basic_lowerband.copy()
+
+    for i in range(1, len(df)):
+        if basic_upperband.iloc[i] < upperband.iloc[i-1] or close.iloc[i-1] > upperband.iloc[i-1]:
+            upperband.iloc[i] = basic_upperband.iloc[i]
+        else:
+            upperband.iloc[i] = upperband.iloc[i-1]
+
+        if basic_lowerband.iloc[i] > lowerband.iloc[i-1] or close.iloc[i-1] < lowerband.iloc[i-1]:
+            lowerband.iloc[i] = basic_lowerband.iloc[i]
+        else:
+            lowerband.iloc[i] = lowerband.iloc[i-1]
+
+    direction = np.ones(len(df))
+    for i in range(1, len(df)):
+        if direction[i-1] == 1:
+            direction[i] = -1 if close.iloc[i] < lowerband.iloc[i] else 1
+        else:
+            direction[i] = 1 if close.iloc[i] > upperband.iloc[i] else -1
+
+    return direction
 
 
 def analyze_market():
-    """Анализ рынка по стратегии Trend-Momentum."""
+    """Анализ рынка по алгоритму стратегии."""
     try:
-        # Скачиваем свечи
         df = yf.download(tickers=SYMBOL, period="2d", interval=INTERVAL, progress=False)
-        
+
         if df.empty or len(df) < 200:
-            print("Недостаточно данных для анализа.")
+            print("Недостаточно данных.")
             return
 
-        # Обработка структуры MultiIndex, если yfinance возвращает её
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # 1. Moving Average (EMA 200)
-        df['EMA200'] = ta.ema(df['Close'], length=200)
+        # Расчет показателей
+        df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
+        df['RSI'] = calculate_rsi(df['Close'], 14)
+        df['STOCHk'], df['STOCHd'] = calculate_stochastic(df, 14, 3)
+        df['ST_DIR'] = calculate_supertrend(df, 10, 3)
 
-        # 2. RSI (14)
-        df['RSI'] = ta.rsi(df['Close'], length=14)
-
-        # 3. Stochastic Oscillator (14, 3, 3)
-        stoch = ta.stoch(df['High'], df['Low'], df['Close'], k=14, d=3, smooth_k=3)
-        df['STOCHk'] = stoch['STOCHk_14_3_3']
-        df['STOCHd'] = stoch['STOCHd_14_3_3']
-
-        # 4. SuperTrend (10, 3)
-        st = ta.supertrend(df['High'], df['Low'], df['Close'], length=10, multiplier=3)
-        df['ST_DIR'] = st['SUPERTd_10_3.0']
-
-        # Берем свежие свечи
         curr = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # Проверка условий CALL (ВВЕРХ)
+        # Сигнал ВВЕРХ
         call_signal = (
             curr['Close'] > curr['EMA200'] and
             curr['ST_DIR'] == 1 and
@@ -70,7 +117,7 @@ def analyze_market():
             curr['STOCHk'] < 50
         )
 
-        # Проверка условий PUT (ВНИЗ)
+        # Сигнал ВНИЗ
         put_signal = (
             curr['Close'] < curr['EMA200'] and
             curr['ST_DIR'] == -1 and
@@ -79,38 +126,25 @@ def analyze_market():
             curr['STOCHk'] > 50
         )
 
-        # Отправка уведомления при наличии сигнала
         if call_signal:
-            msg = (
-                f"🚀 *СИГНАЛ: ВВЕРХ (CALL)*\n\n"
-                f"📊 *Инструмент:* {SYMBOL}\n"
-                f"⏱ *Таймфрейм:* {INTERVAL}\n"
-                f"💡 *Экспирация:* 2-3 свечи (10-15 мин)\n"
-                f"📈 *Цена:* {curr['Close']:.5f}"
-            )
-            print(f"[{pd.Timestamp.now()}] Отправлен сигнал CALL")
+            msg = f"🚀 *СИГНАЛ: ВВЕРХ (CALL)*\n\n📊 Пара: {SYMBOL}\n⏱ Таймфрейм: {INTERVAL}\n💡 Экспирация: 10-15 мин\n📈 Цена: {curr['Close']:.5f}"
             send_telegram_message(msg)
-
+            print(f"[{pd.Timestamp.now()}] Сигнал CALL отправлен")
         elif put_signal:
-            msg = (
-                f"🔻 *СИГНАЛ: ВНИЗ (PUT)*\n\n"
-                f"📊 *Инструмент:* {SYMBOL}\n"
-                f"⏱ *Таймфрейм:* {INTERVAL}\n"
-                f"💡 *Экспирация:* 2-3 свечи (10-15 мин)\n"
-                f"📉 *Цена:* {curr['Close']:.5f}"
-            )
-            print(f"[{pd.Timestamp.now()}] Отправлен сигнал PUT")
+            msg = f"🔻 *СИГНАЛ: ВНИЗ (PUT)*\n\n📊 Пара: {SYMBOL}\n⏱ Таймфрейм: {INTERVAL}\n💡 Экспирация: 10-15 мин\n📉 Цена: {curr['Close']:.5f}"
             send_telegram_message(msg)
+            print(f"[{pd.Timestamp.now()}] Сигнал PUT отправлен")
         else:
-            print(f"[{pd.Timestamp.now()}] Анализ выполнен. Сигналов нет.")
+            print(f"[{pd.Timestamp.now()}] Проверка завершена. Сигналов нет.")
 
     except Exception as e:
         print(f"Ошибка во время анализа: {e}")
 
 
 if __name__ == "__main__":
-    send_telegram_message("🤖 *Бот успешно запущен и отслеживает сигналы!*")
+    send_telegram_message("🤖 *Бот запущен и готовит сигналы!*")
     while True:
         analyze_market()
         time.sleep(CHECK_INTERVAL)
+
 
