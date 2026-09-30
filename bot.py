@@ -1,5 +1,7 @@
 import os
 import time
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 import numpy as np
 import pandas as pd
@@ -10,8 +12,25 @@ TELEGRAM_BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"  # Укажите токен
 TELEGRAM_CHAT_ID = "ВАШ_CHAT_ID"       # Укажите Ваш ID чата
 SYMBOL = "EURUSD=X"                    # Валютная пара
 INTERVAL = "5m"                        # Таймфрейм
-CHECK_INTERVAL = 300                   # Проверка раз в 5 минут
+CHECK_INTERVAL = 300                   # Проверка каждые 5 минут
 # =============================================
+
+
+# Заглушка HTTP-сервера для требования Render
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+    def log_message(self, format, *args):
+        return
+
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), SimpleHTTPRequestHandler)
+    server.serve_forever()
 
 
 def send_telegram_message(message: str):
@@ -98,7 +117,6 @@ def analyze_market():
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Индикаторы
         df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
         df['RSI'] = calculate_rsi(df['Close'], 14)
         df['STOCHk'], df['STOCHd'] = calculate_stochastic(df, 14, 3)
@@ -107,7 +125,6 @@ def analyze_market():
         curr = df.iloc[-1]
         prev = df.iloc[-2]
 
-        # Сигнал ВВЕРХ
         call_signal = (
             curr['Close'] > curr['EMA200'] and
             curr['ST_DIR'] == 1 and
@@ -116,7 +133,6 @@ def analyze_market():
             curr['STOCHk'] < 50
         )
 
-        # Сигнал ВНИЗ
         put_signal = (
             curr['Close'] < curr['EMA200'] and
             curr['ST_DIR'] == -1 and
@@ -140,11 +156,21 @@ def analyze_market():
         print(f"Ошибка во время анализа: {e}")
 
 
-if __name__ == "__main__":
+def bot_loop():
     send_telegram_message("🤖 *Бот успешно запущен и анализирует рынок!*")
     while True:
         analyze_market()
         time.sleep(CHECK_INTERVAL)
+
+
+if __name__ == "__main__":
+    # Запуск заглушки сервера в отдельном потоке
+    server_thread = threading.Thread(target=run_http_server, daemon=True)
+    server_thread.start()
+
+    # Запуск основного логического цикла
+    bot_loop()
+
 
 
 
