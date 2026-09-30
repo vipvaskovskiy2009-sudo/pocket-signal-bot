@@ -10,9 +10,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 # =========================================================
-# POCKET SIGNAL 12.0 — FINAL
-# Часто + уверенно. 6 блокирующих фильтров.
-# Momentum растёт, RSI в здоровой зоне, DI не экстремальный.
+# POCKET SIGNAL 13.0 — BALANCED SCORE
+# 3 блокирующих фильтра + 6 очков. 5–10 сигналов в день.
 # =========================================================
 
 
@@ -29,10 +28,10 @@ SYMBOLS = {
 }
 
 CHECK_EVERY_SECONDS = 45
-COOLDOWN_MINUTES = 6
+COOLDOWN_MINUTES = 5
 
 # =========================================================
-# ФИЛЬТРЫ (жёсткие, но не параноидальные)
+# ФИЛЬТРЫ
 # =========================================================
 
 # Тренд старших ТФ
@@ -40,36 +39,42 @@ TREND_EMA_FAST = 9
 TREND_EMA_MID = 21
 TREND_EMA_SLOW = 50
 
-# M1 ADX — есть движение
-M1_ADX_MIN = 20.0
+# M1 ADX — блокирующий
+M1_ADX_MIN = 17.0
 
-# DI: не слабый и не экстремальный
-M1_DI_MIN = 18.0                # доминирующий DI ≥ 18
-M1_DI_MAX = 62.0                # доминирующий DI ≤ 62 (иначе "поезд уехал")
+# DI — блокирующий (доминирующий DI ≥ 16)
+M1_DI_MIN = 16.0
 
-# RSI — здоровая зона, не у края
-M1_RSI_CALL_MIN = 52.0
-M1_RSI_CALL_MAX = 65.0          # НЕ выше 65 — отсекает вход на пике
-M1_RSI_PUT_MIN = 35.0           # НЕ ниже 35
-M1_RSI_PUT_MAX = 48.0
+# RSI окна (мягкие)
+M1_RSI_CALL_MIN = 50.0
+M1_RSI_CALL_MAX = 72.0
+M1_RSI_PUT_MIN = 28.0
+M1_RSI_PUT_MAX = 50.0
 
 # Свеча
 M1_CANDLE_BODY_MIN = 0.40
 
-# ATR — волатильность не мертва
-ATR_MIN_RATIO = 0.75
+# ATR
+ATR_MIN_RATIO = 0.70
 
-# Bollinger — не у края
+# Bollinger
 BB_PERIOD = 20
 BB_POS_MIN = 0.10
 BB_POS_MAX = 0.90
+
+# =========================================================
+# ПОРОГ ОЧКОВ
+# =========================================================
+
+MIN_SCORE = 3           # минимально допустимый (умеренный)
+STRONG_SCORE = 5        # метка "сильный"
 
 # =========================================================
 # СЕССИЯ
 # =========================================================
 
 SESSION_START_HOUR_UTC = 7
-SESSION_END_HOUR_UTC = 20
+SESSION_END_HOUR_UTC = 21
 TRADE_WEEKDAYS = {0, 1, 2, 3, 4}
 NEWS_BLACKOUT_MINUTES = {28, 29, 30, 31, 32, 58, 59, 0, 1, 2}
 
@@ -86,6 +91,7 @@ state = {
     "last_signal_time": None,
     "last_signal_direction": None,
     "last_signal_symbol": None,
+    "last_signal_score": None,
     "series_results": [],
     "block_stats": {},
 }
@@ -106,7 +112,7 @@ def log(message):
 def http_get(url, timeout=20):
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "Mozilla/5.0 PocketSignal/12.0"}
+        headers={"User-Agent": "Mozilla/5.0 PocketSignal/13.0"}
     )
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -438,7 +444,7 @@ def candle_body_ratio(c):
 
 
 # =========================================================
-# STRATEGY — 6 БЛОКИРУЮЩИХ ФИЛЬТРОВ
+# STRATEGY — 3 блока + 6 очков
 # =========================================================
 
 def check_strategy(m1, m5, m15, h1):
@@ -454,133 +460,136 @@ def check_strategy(m1, m5, m15, h1):
     for a in (a1, a5, a15, ah):
         for v in a.values():
             if v is None:
-                return {"direction": None, "block_reason": "NaN индикатор"}
+                return {"direction": None, "block_reason": "NaN"}
 
     # =====================================================
-    # ФИЛЬТР 1: H1 и M15 — один тренд
+    # БЛОК 1: H1 тренд
     # =====================================================
     h1_dir = trend_direction(ah)
-    m15_dir = trend_direction(a15)
     if h1_dir is None:
         return {"direction": None, "block_reason": "H1 без тренда"}
-    if m15_dir != h1_dir:
-        return {"direction": None,
-                "block_reason": f"M15({m15_dir})≠H1({h1_dir})"}
 
     direction = "CALL" if h1_dir == "UP" else "PUT"
 
     # =====================================================
-    # ФИЛЬТР 2: M5 EMA выстроены в ту же сторону
-    # =====================================================
-    m5_dir = trend_direction(a5)
-    if m5_dir != h1_dir:
-        return {"direction": None,
-                "block_reason": f"M5({m5_dir})≠H1"}
-
-    # =====================================================
-    # ФИЛЬТР 3: M1 ADX >= 20
+    # БЛОК 2: M1 ADX
     # =====================================================
     if a1["adx"] < M1_ADX_MIN:
         return {"direction": None,
-                "block_reason": f"ADX {a1['adx']:.1f}<{M1_ADX_MIN}"}
+                "block_reason": f"ADX {a1['adx']:.1f}"}
 
     # =====================================================
-    # ФИЛЬТР 4: DI — сильный, но не экстремальный
+    # БЛОК 3: DI в сторону
     # =====================================================
     if direction == "CALL":
-        if a1["plus_di"] < M1_DI_MIN:
+        if a1["plus_di"] < M1_DI_MIN or a1["plus_di"] <= a1["minus_di"]:
             return {"direction": None,
-                    "block_reason": f"+DI {a1['plus_di']:.1f} слабый"}
-        if a1["plus_di"] > M1_DI_MAX:
-            return {"direction": None,
-                    "block_reason": f"+DI {a1['plus_di']:.1f} экстремум"}
-        if a1["plus_di"] <= a1["minus_di"]:
-            return {"direction": None,
-                    "block_reason": "DI не в сторону CALL"}
+                    "block_reason": f"+DI {a1['plus_di']:.1f}"}
     else:
-        if a1["minus_di"] < M1_DI_MIN:
+        if a1["minus_di"] < M1_DI_MIN or a1["minus_di"] <= a1["plus_di"]:
             return {"direction": None,
-                    "block_reason": f"-DI {a1['minus_di']:.1f} слабый"}
-        if a1["minus_di"] > M1_DI_MAX:
-            return {"direction": None,
-                    "block_reason": f"-DI {a1['minus_di']:.1f} экстремум"}
-        if a1["minus_di"] <= a1["plus_di"]:
-            return {"direction": None,
-                    "block_reason": "DI не в сторону PUT"}
+                    "block_reason": f"-DI {a1['minus_di']:.1f}"}
 
     # =====================================================
-    # ФИЛЬТР 5: M1 EMA + RSI (здоровая зона)
+    # ОЧКИ
     # =====================================================
+    score = 0
+    reasons = []
+
+    # M5 тренд совпадает
+    m5_dir = trend_direction(a5)
+    if m5_dir == h1_dir:
+        score += 1
+        reasons.append("M5 совпадает")
+
+    # M15 совпадает
+    m15_dir = trend_direction(a15)
+    if m15_dir == h1_dir:
+        score += 1
+        reasons.append("M15 совпадает")
+
+    # M1 EMA выстроены
     if direction == "CALL":
-        if not (a1["ema_fast"] > a1["ema_mid"] > a1["ema_slow"]):
-            return {"direction": None, "block_reason": "M1 EMA не UP"}
-        if not (M1_RSI_CALL_MIN <= a1["rsi"] <= M1_RSI_CALL_MAX):
-            return {"direction": None,
-                    "block_reason": f"RSI {a1['rsi']:.1f} вне CALL-зоны"}
+        if a1["ema_fast"] > a1["ema_mid"] > a1["ema_slow"]:
+            score += 1
+            reasons.append("M1 EMA UP")
     else:
-        if not (a1["ema_fast"] < a1["ema_mid"] < a1["ema_slow"]):
-            return {"direction": None, "block_reason": "M1 EMA не DOWN"}
-        if not (M1_RSI_PUT_MIN <= a1["rsi"] <= M1_RSI_PUT_MAX):
-            return {"direction": None,
-                    "block_reason": f"RSI {a1['rsi']:.1f} вне PUT-зоны"}
+        if a1["ema_fast"] < a1["ema_mid"] < a1["ema_slow"]:
+            score += 1
+            reasons.append("M1 EMA DOWN")
 
-    # =====================================================
-    # ФИЛЬТР 6: MACD hist РАСТЁТ (не просто положительный!)
-    # =====================================================
-    if a1["macd_hist_prev"] is None:
-        return {"direction": None, "block_reason": "нет MACD prev"}
-
+    # RSI в зоне
     if direction == "CALL":
-        if not (a1["macd_hist"] > 0
-                and a1["macd_hist"] > a1["macd_hist_prev"]):
-            return {"direction": None,
-                    "block_reason": "MACD hist не растёт"}
+        if M1_RSI_CALL_MIN <= a1["rsi"] <= M1_RSI_CALL_MAX:
+            score += 1
+            reasons.append(f"RSI {a1['rsi']:.1f}")
     else:
-        if not (a1["macd_hist"] < 0
-                and a1["macd_hist"] < a1["macd_hist_prev"]):
-            return {"direction": None,
-                    "block_reason": "MACD hist не падает"}
+        if M1_RSI_PUT_MIN <= a1["rsi"] <= M1_RSI_PUT_MAX:
+            score += 1
+            reasons.append(f"RSI {a1['rsi']:.1f}")
 
-    # =====================================================
-    # Проверки силы (не блокирующие)
-    # =====================================================
-    extras = {}
+    # MACD подтверждает
+    if direction == "CALL":
+        if a1["macd_hist"] > 0 and a1["macd"] > a1["macd_signal"]:
+            score += 1
+            reasons.append("MACD bull")
+    else:
+        if a1["macd_hist"] < 0 and a1["macd"] < a1["macd_signal"]:
+            score += 1
+            reasons.append("MACD bear")
 
+    # BB не у края
+    bb_rng = a1["bb_high"] - a1["bb_low"]
+    bb_pos = 0.5
+    if bb_rng > 0:
+        bb_pos = (a1["price"] - a1["bb_low"]) / bb_rng
+        if BB_POS_MIN <= bb_pos <= BB_POS_MAX:
+            score += 1
+            reasons.append(f"BB {bb_pos:.2f}")
+
+    # Свеча
+    last = m1[-1]
+    body = candle_body_ratio(last)
+    candle_ok = False
+    if direction == "CALL" and last["close"] > last["open"] and body >= M1_CANDLE_BODY_MIN:
+        candle_ok = True
+    elif direction == "PUT" and last["close"] < last["open"] and body >= M1_CANDLE_BODY_MIN:
+        candle_ok = True
+    if candle_ok:
+        score += 1
+        reasons.append(f"Свеча {body:.0%}")
+
+    # ATR (не очко, но инфо)
     recent_atr = []
     for i in range(max(15, len(m1) - 30), len(m1) - 1):
         val = atr(m1[:i + 1], 14)[-1]
         if val is not None:
             recent_atr.append(val)
+    atr_ok = True
     if recent_atr:
         avg_atr = sum(recent_atr) / len(recent_atr)
-        extras["atr_ok"] = (avg_atr > 0 and a1["atr"] >= avg_atr * ATR_MIN_RATIO)
-    else:
-        extras["atr_ok"] = False
+        if avg_atr > 0 and a1["atr"] < avg_atr * ATR_MIN_RATIO:
+            atr_ok = False
 
-    bb_rng = a1["bb_high"] - a1["bb_low"]
-    if bb_rng > 0:
-        pos = (a1["price"] - a1["bb_low"]) / bb_rng
-        extras["bb_pos"] = pos
-        extras["bb_ok"] = (BB_POS_MIN <= pos <= BB_POS_MAX)
-    else:
-        extras["bb_pos"] = 0.5
-        extras["bb_ok"] = False
+    # =====================================================
+    # РЕШЕНИЕ
+    # =====================================================
+    if score < MIN_SCORE:
+        return {"direction": None,
+                "block_reason": f"score {score}"}
 
-    last = m1[-1]
-    body = candle_body_ratio(last)
-    extras["body"] = body
-    extras["body_ok"] = body >= M1_CANDLE_BODY_MIN
-
-    if direction == "CALL":
-        extras["candle_ok"] = last["close"] > last["open"]
-    else:
-        extras["candle_ok"] = last["close"] < last["open"]
+    label = "СИЛЬНЫЙ" if score >= STRONG_SCORE else "УМЕРЕННЫЙ"
 
     return {
         "direction": direction,
         "block_reason": None,
+        "score": score,
+        "label": label,
+        "reasons": reasons,
         "m1": a1, "m5": a5, "m15": a15, "h1": ah,
-        "extras": extras,
+        "atr_ok": atr_ok,
+        "bb_pos": bb_pos,
+        "body": body,
     }
 
 
@@ -602,51 +611,45 @@ def signal_message(name, r):
     a5 = r["m5"]
     a15 = r["m15"]
     ah = r["h1"]
-    ex = r.get("extras", {})
+    score = r["score"]
+    label = r["label"]
 
     if direction == "CALL":
         header = "🐂 <b>БЫК → ВВЕРХ</b>"
-        emoji = "🟢"
     else:
         header = "🐻 <b>МЕДВЕДЬ → ВНИЗ</b>"
-        emoji = "🔴"
 
-    extras_lines = []
-    if ex.get("atr_ok"):
-        extras_lines.append("✅ ATR расширяется")
-    if ex.get("bb_ok"):
-        extras_lines.append(f"✅ BB позиция {ex.get('bb_pos', 0):.2f}")
-    if ex.get("body_ok"):
-        extras_lines.append(f"✅ Свеча {ex.get('body', 0):.0%}")
-    if ex.get("candle_ok"):
-        extras_lines.append("✅ Направление свечи")
+    if score >= STRONG_SCORE:
+        stars = "🟢🟢🟢"
+        label_str = f"<b>{label}</b> ({score}/6)"
+    else:
+        stars = "🟢🟢"
+        label_str = f"<b>{label}</b> ({score}/6)"
 
-    extras_txt = "\n".join(extras_lines) if extras_lines else "—"
+    reasons_txt = "\n".join("• " + x for x in r["reasons"])
 
-    hist_prev = a1.get("macd_hist_prev", 0)
-    hist_now = a1.get("macd_hist", 0)
+    extras = []
+    if r.get("atr_ok"):
+        extras.append("✅ ATR расширяется")
+    extras_txt = "\n".join(extras) if extras else ""
 
     return (
-        f"{emoji}{emoji} <b>СИГНАЛ</b>\n"
-        f"{header}\n\n"
+        f"{stars}\n"
+        f"{header}\n"
+        f"Качество: {label_str}\n\n"
         f"💱 <b>{name}</b>\n"
         f"Цена: <code>{a1['price']:.5f}</code>\n\n"
-        f"🎯 <b>6 фильтров пройдено:</b>\n"
-        f"✅ H1 + M15 тренд\n"
-        f"✅ M5 EMA выстроены\n"
-        f"✅ M1 ADX {a1['adx']:.1f} ≥ {M1_ADX_MIN}\n"
-        f"✅ DI в зоне ({a1['plus_di']:.1f}/{a1['minus_di']:.1f})\n"
-        f"✅ M1 EMA + RSI {a1['rsi']:.1f}\n"
-        f"✅ MACD hist растёт ({hist_prev:.6f} → {hist_now:.6f})\n\n"
-        f"📊 <b>Доп. подтверждения:</b>\n{extras_txt}\n\n"
-        f"<b>Снимок:</b>\n"
+        f"📋 <b>Очки:</b>\n{reasons_txt}\n\n"
+        f"📊 <b>Снимок:</b>\n"
         f"H1: ADX {ah['adx']:.1f} | RSI {ah['rsi']:.1f}\n"
         f"M15: ADX {a15['adx']:.1f} | RSI {a15['rsi']:.1f}\n"
         f"M5: ADX {a5['adx']:.1f} | RSI {a5['rsi']:.1f}\n"
-        f"M1: ADX {a1['adx']:.1f} | +DI {a1['plus_di']:.1f} | -DI {a1['minus_di']:.1f}\n\n"
-        f"⏱ <b>Экспирация: 60 секунд</b>\n"
+        f"M1: ADX {a1['adx']:.1f} | +DI {a1['plus_di']:.1f} | -DI {a1['minus_di']:.1f}\n"
+        f"M1 RSI: {a1['rsi']:.1f}\n"
+        f"{extras_txt}\n\n"
+        f"⏱ <b>Экспирация: 60 сек</b>\n"
         f"💵 Ставка: <b>${FIXED_AMOUNT:.2f}</b>\n\n"
-        f"⚠️ Не гарантия. Но 6 совпадающих фильтров — сильный сетап."
+        f"⚠️ {score}/6 — статистический сетап, не гарантия."
     )
 
 
@@ -693,10 +696,11 @@ def scan_market(force=False):
             result = check_strategy(m1, m5, m15, h1)
 
             if result["direction"]:
-                log(f"✅ {name}: {result['direction']}")
+                log(f"✅ {name}: {result['direction']} score={result['score']}/6 ({result['label']})")
                 state["last_signal_time"] = datetime.now(timezone.utc)
                 state["last_signal_direction"] = result["direction"]
                 state["last_signal_symbol"] = name
+                state["last_signal_score"] = result["score"]
                 state["signals_sent"] += 1
                 send_message_to_last_chat(signal_message(name, result))
                 return
@@ -719,21 +723,22 @@ def handle_command(chat_id, text):
     if text == "/start":
         send_message(
             chat_id,
-            "⚡ <b>POCKET SIGNAL 12.0 — FINAL</b>\n\n"
-            "6 блокирующих фильтров:\n\n"
-            "1️⃣ H1 + M15 — один тренд\n"
-            "2️⃣ M5 EMA выстроены\n"
-            "3️⃣ M1 ADX ≥ 20\n"
-            "4️⃣ DI в зоне 18–62\n"
-            "5️⃣ M1 EMA + RSI 52–65 (CALL) / 35–48 (PUT)\n"
-            "6️⃣ <b>MACD hist РАСТЁТ</b> (не просто положительный)\n\n"
-            "📊 <b>Ожидания:</b>\n"
-            "• 3–6 сигналов в день\n"
-            "• Сессия 07–20 UTC, Пн–Пт\n"
-            "• Cooldown 6 минут\n"
-            "• Ставка $5 фиксированная\n\n"
-            "⚠️ Даже при 6 фильтрах ~40% сделок проигрывают. "
-            "Это математика 60-секундной экспирации.",
+            "⚡ <b>POCKET SIGNAL 13.0</b>\n\n"
+            "<b>Блокирующие фильтры (3):</b>\n"
+            "• H1 тренд\n"
+            "• M1 ADX ≥ 17\n"
+            "• DI в сторону\n\n"
+            "<b>Очки (6):</b>\n"
+            "• M5 тренд совпадает\n"
+            "• M15 тренд совпадает\n"
+            "• M1 EMA выстроены\n"
+            "• RSI в зоне\n"
+            "• MACD подтверждает\n"
+            "• BB не у края\n"
+            "• Свеча в направлении\n\n"
+            f"<b>Порог:</b> минимум {MIN_SCORE}/6\n"
+            f"<b>Сильный:</b> {STRONG_SCORE}+/6\n\n"
+            "📊 5–10 сигналов в день, сессия 07–20 UTC.",
             MAIN_KEYBOARD
         )
         return
@@ -741,9 +746,10 @@ def handle_command(chat_id, text):
     if text == "📊 СИГНАЛЫ":
         send_message(
             chat_id,
-            "📊 Финальный режим активен.\n\n"
-            "Скан 45 сек, cooldown 6 мин.\n"
-            "6 пар, сессия 07–20 UTC.",
+            "📊 Сканер активен.\n\n"
+            f"Порог: {MIN_SCORE}/6 очков.\n"
+            f"Cooldown {COOLDOWN_MINUTES} мин.\n"
+            f"Сессия 07–20 UTC, Пн–Пт.",
             MAIN_KEYBOARD
         )
         return
@@ -769,7 +775,10 @@ def handle_command(chat_id, text):
             f"Losses: {state['losses']}\n"
             f"Winrate: {wr:.1f}%\n"
             f"Breakeven: 55.5%\n\n"
-            f"<b>Топ-5 блокировок:</b>\n{blocks_txt}",
+            f"Последний: {state['last_signal_symbol'] or '—'} "
+            f"{state['last_signal_direction'] or ''} "
+            f"({state['last_signal_score'] or '—'}/6)\n\n"
+            f"<b>Топ блокировок:</b>\n{blocks_txt}",
             MAIN_KEYBOARD
         )
         return
@@ -802,7 +811,7 @@ def handle_command(chat_id, text):
 
 def telegram_loop():
     offset = 0
-    log("Pocket Signal 12.0 started — FINAL")
+    log("Pocket Signal 13.0 started")
     while True:
         try:
             result = telegram("getUpdates", {"timeout": 30, "offset": offset})
@@ -835,7 +844,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Pocket Signal 12.0 FINAL is running.")
+        self.wfile.write(b"Pocket Signal 13.0 is running.")
 
     def log_message(self, format, *args):
         return
