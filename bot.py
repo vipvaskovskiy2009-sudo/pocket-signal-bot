@@ -10,8 +10,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
 # =========================================================
-# POCKET SIGNAL 13.0 — BALANCED SCORE
-# 3 блокирующих фильтра + 6 очков. 5–10 сигналов в день.
+# POCKET SIGNAL 15.0 — BALANCED SCORE + H1/M15 ADX GUARD
+# 5 блокирующих проверок + 6 очков.
+# 5–10 сигналов в день. Боковик отсекается по ADX старших ТФ.
 # =========================================================
 
 
@@ -34,15 +35,14 @@ COOLDOWN_MINUTES = 5
 # ФИЛЬТРЫ
 # =========================================================
 
-# Тренд старших ТФ
-TREND_EMA_FAST = 9
-TREND_EMA_MID = 21
-TREND_EMA_SLOW = 50
+# ADX старших ТФ — блокирующие (мягкие)
+H1_ADX_MIN = 15.0
+M15_ADX_MIN = 15.0
 
 # M1 ADX — блокирующий
 M1_ADX_MIN = 17.0
 
-# DI — блокирующий (доминирующий DI ≥ 16)
+# DI — блокирующий
 M1_DI_MIN = 16.0
 
 # RSI окна (мягкие)
@@ -66,8 +66,8 @@ BB_POS_MAX = 0.90
 # ПОРОГ ОЧКОВ
 # =========================================================
 
-MIN_SCORE = 3           # минимально допустимый (умеренный)
-STRONG_SCORE = 5        # метка "сильный"
+MIN_SCORE = 3
+STRONG_SCORE = 5
 
 # =========================================================
 # СЕССИЯ
@@ -112,7 +112,7 @@ def log(message):
 def http_get(url, timeout=20):
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "Mozilla/5.0 PocketSignal/13.0"}
+        headers={"User-Agent": "Mozilla/5.0 PocketSignal/15.0"}
     )
     with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -131,7 +131,11 @@ def telegram(method, payload=None):
 
 
 def send_message(chat_id, text, keyboard=None):
-    payload = {"chat_id": chat_id, "text": text}
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+    }
     if keyboard:
         payload["reply_markup"] = json.dumps(keyboard, ensure_ascii=False)
     return telegram("sendMessage", payload)
@@ -412,7 +416,7 @@ def snapshot(candles, ema_f=9, ema_m=21, ema_s=50, rsi_p=14):
 
 
 # =========================================================
-# FILTERS
+# HELPERS
 # =========================================================
 
 def is_market_open():
@@ -444,7 +448,7 @@ def candle_body_ratio(c):
 
 
 # =========================================================
-# STRATEGY — 3 блока + 6 очков
+# STRATEGY — 5 блоков + 6 очков
 # =========================================================
 
 def check_strategy(m1, m5, m15, h1):
@@ -463,23 +467,37 @@ def check_strategy(m1, m5, m15, h1):
                 return {"direction": None, "block_reason": "NaN"}
 
     # =====================================================
-    # БЛОК 1: H1 тренд
+    # БЛОК 1: H1 ADX ≥ 15 (боковик отсекаем)
+    # =====================================================
+    if ah["adx"] < H1_ADX_MIN:
+        return {"direction": None,
+                "block_reason": f"H1 ADX {ah['adx']:.1f}"}
+
+    # =====================================================
+    # БЛОК 2: M15 ADX ≥ 15
+    # =====================================================
+    if a15["adx"] < M15_ADX_MIN:
+        return {"direction": None,
+                "block_reason": f"M15 ADX {a15['adx']:.1f}"}
+
+    # =====================================================
+    # БЛОК 3: H1 тренд чёткий
     # =====================================================
     h1_dir = trend_direction(ah)
     if h1_dir is None:
-        return {"direction": None, "block_reason": "H1 без тренда"}
+        return {"direction": None, "block_reason": "H1 EMA не выстроены"}
 
     direction = "CALL" if h1_dir == "UP" else "PUT"
 
     # =====================================================
-    # БЛОК 2: M1 ADX
+    # БЛОК 4: M1 ADX ≥ 17
     # =====================================================
     if a1["adx"] < M1_ADX_MIN:
         return {"direction": None,
-                "block_reason": f"ADX {a1['adx']:.1f}"}
+                "block_reason": f"M1 ADX {a1['adx']:.1f}"}
 
     # =====================================================
-    # БЛОК 3: DI в сторону
+    # БЛОК 5: DI в сторону
     # =====================================================
     if direction == "CALL":
         if a1["plus_di"] < M1_DI_MIN or a1["plus_di"] <= a1["minus_di"]:
@@ -491,7 +509,7 @@ def check_strategy(m1, m5, m15, h1):
                     "block_reason": f"-DI {a1['minus_di']:.1f}"}
 
     # =====================================================
-    # ОЧКИ
+    # ОЧКИ (6 возможных)
     # =====================================================
     score = 0
     reasons = []
@@ -559,7 +577,7 @@ def check_strategy(m1, m5, m15, h1):
         score += 1
         reasons.append(f"Свеча {body:.0%}")
 
-    # ATR (не очко, но инфо)
+    # ATR (инфо, не очко)
     recent_atr = []
     for i in range(max(15, len(m1) - 30), len(m1) - 1):
         val = atr(m1[:i + 1], 14)[-1]
@@ -615,17 +633,11 @@ def signal_message(name, r):
     label = r["label"]
 
     if direction == "CALL":
-        header = "🐂 <b>БЫК → ВВЕРХ</b>"
+        header = "🐂 БЫК → ВВЕРХ"
     else:
-        header = "🐻 <b>МЕДВЕДЬ → ВНИЗ</b>"
+        header = "🐻 МЕДВЕДЬ → ВНИЗ"
 
-    if score >= STRONG_SCORE:
-        stars = "🟢🟢🟢"
-        label_str = f"<b>{label}</b> ({score}/6)"
-    else:
-        stars = "🟢🟢"
-        label_str = f"<b>{label}</b> ({score}/6)"
-
+    stars = "🟢🟢🟢" if score >= STRONG_SCORE else "🟢🟢"
     reasons_txt = "\n".join("• " + x for x in r["reasons"])
 
     extras = []
@@ -635,21 +647,27 @@ def signal_message(name, r):
 
     return (
         f"{stars}\n"
+        f"<b>{direction}</b>\n"
         f"{header}\n"
-        f"Качество: {label_str}\n\n"
+        f"Качество: <b>{label}</b> ({score}/6)\n\n"
         f"💱 <b>{name}</b>\n"
         f"Цена: <code>{a1['price']:.5f}</code>\n\n"
-        f"📋 <b>Очки:</b>\n{reasons_txt}\n\n"
-        f"📊 <b>Снимок:</b>\n"
+        f"<b>✅ Блоки пройдены:</b>\n"
+        f"• H1 ADX {ah['adx']:.1f} ≥ {H1_ADX_MIN}\n"
+        f"• M15 ADX {a15['adx']:.1f} ≥ {M15_ADX_MIN}\n"
+        f"• H1 EMA выстроены\n"
+        f"• M1 ADX {a1['adx']:.1f} ≥ {M1_ADX_MIN}\n"
+        f"• DI: +{a1['plus_di']:.1f} / -{a1['minus_di']:.1f}\n\n"
+        f"<b>📋 Очки ({score}/6):</b>\n{reasons_txt}\n\n"
+        f"<b>📊 Снимок:</b>\n"
         f"H1: ADX {ah['adx']:.1f} | RSI {ah['rsi']:.1f}\n"
         f"M15: ADX {a15['adx']:.1f} | RSI {a15['rsi']:.1f}\n"
         f"M5: ADX {a5['adx']:.1f} | RSI {a5['rsi']:.1f}\n"
-        f"M1: ADX {a1['adx']:.1f} | +DI {a1['plus_di']:.1f} | -DI {a1['minus_di']:.1f}\n"
-        f"M1 RSI: {a1['rsi']:.1f}\n"
+        f"M1: ADX {a1['adx']:.1f} | RSI {a1['rsi']:.1f}\n"
         f"{extras_txt}\n\n"
         f"⏱ <b>Экспирация: 60 сек</b>\n"
         f"💵 Ставка: <b>${FIXED_AMOUNT:.2f}</b>\n\n"
-        f"⚠️ {score}/6 — статистический сетап, не гарантия."
+        f"⚠️ Не гарантия. Статистический сетап."
     )
 
 
@@ -696,7 +714,7 @@ def scan_market(force=False):
             result = check_strategy(m1, m5, m15, h1)
 
             if result["direction"]:
-                log(f"✅ {name}: {result['direction']} score={result['score']}/6 ({result['label']})")
+                log(f"✅ {name}: {result['direction']} {result['label']} ({result['score']}/6)")
                 state["last_signal_time"] = datetime.now(timezone.utc)
                 state["last_signal_direction"] = result["direction"]
                 state["last_signal_symbol"] = name
@@ -723,20 +741,22 @@ def handle_command(chat_id, text):
     if text == "/start":
         send_message(
             chat_id,
-            "⚡ <b>POCKET SIGNAL 13.0</b>\n\n"
-            "<b>Блокирующие фильтры (3):</b>\n"
-            "• H1 тренд\n"
+            "⚡ <b>POCKET SIGNAL 15.0</b>\n\n"
+            "<b>Блокирующие проверки:</b>\n"
+            "• H1 ADX ≥ 15\n"
+            "• M15 ADX ≥ 15\n"
+            "• H1 EMA выстроены\n"
             "• M1 ADX ≥ 17\n"
             "• DI в сторону\n\n"
             "<b>Очки (6):</b>\n"
-            "• M5 тренд совпадает\n"
-            "• M15 тренд совпадает\n"
+            "• M5 совпадает\n"
+            "• M15 совпадает\n"
             "• M1 EMA выстроены\n"
             "• RSI в зоне\n"
             "• MACD подтверждает\n"
             "• BB не у края\n"
             "• Свеча в направлении\n\n"
-            f"<b>Порог:</b> минимум {MIN_SCORE}/6\n"
+            f"<b>Порог:</b> {MIN_SCORE}/6\n"
             f"<b>Сильный:</b> {STRONG_SCORE}+/6\n\n"
             "📊 5–10 сигналов в день, сессия 07–20 UTC.",
             MAIN_KEYBOARD
@@ -748,8 +768,9 @@ def handle_command(chat_id, text):
             chat_id,
             "📊 Сканер активен.\n\n"
             f"Порог: {MIN_SCORE}/6 очков.\n"
+            f"H1/M15 ADX ≥ 15.\n"
             f"Cooldown {COOLDOWN_MINUTES} мин.\n"
-            f"Сессия 07–20 UTC, Пн–Пт.",
+            f"Сессия 07–20 UTC.",
             MAIN_KEYBOARD
         )
         return
@@ -811,7 +832,7 @@ def handle_command(chat_id, text):
 
 def telegram_loop():
     offset = 0
-    log("Pocket Signal 13.0 started")
+    log("Pocket Signal 15.0 started")
     while True:
         try:
             result = telegram("getUpdates", {"timeout": 30, "offset": offset})
@@ -844,7 +865,7 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Pocket Signal 13.0 is running.")
+        self.wfile.write(b"Pocket Signal 15.0 is running.")
 
     def log_message(self, format, *args):
         return
@@ -855,6 +876,16 @@ def health_server():
     server = HTTPServer(("0.0.0.0", port), HealthHandler)
     log(f"Health server on {port}")
     server.serve_forever()
+
+
+# =========================================================
+# START
+# =========================================================
+
+if __name__ == "__main__":
+    threading.Thread(target=health_server, daemon=True).start()
+    threading.Thread(target=telegram_loop, daemon=True).start()
+    scanner_loop()
 
 
 # =========================================================
