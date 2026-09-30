@@ -6,11 +6,11 @@ import pandas as pd
 import yfinance as yf
 
 # ================= НАСТРОЙКИ =================
-TELEGRAM_BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"  # Токен от @BotFather
-TELEGRAM_CHAT_ID = "ВАШ_CHAT_ID"       # Ваш ID чата
+TELEGRAM_BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"  # Укажите токен
+TELEGRAM_CHAT_ID = "ВАШ_CHAT_ID"       # Укажите Ваш ID чата
 SYMBOL = "EURUSD=X"                    # Валютная пара
 INTERVAL = "5m"                        # Таймфрейм
-CHECK_INTERVAL = 300                   # Проверка каждые 5 минут
+CHECK_INTERVAL = 300                   # Проверка раз в 5 минут
 # =============================================
 
 
@@ -25,11 +25,11 @@ def send_telegram_message(message: str):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Ошибка отправки сообщения: {e}")
+        print(f"Ошибка отправки в Telegram: {e}")
 
 
 def calculate_rsi(series, period=14):
-    """Расчет индикатора RSI."""
+    """Расчет RSI."""
     delta = series.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -38,7 +38,7 @@ def calculate_rsi(series, period=14):
 
 
 def calculate_stochastic(df, k_period=14, d_period=3):
-    """Расчет осциллятора Stochastic."""
+    """Расчет Stochastic."""
     low_min = df['Low'].rolling(window=k_period).min()
     high_max = df['High'].rolling(window=k_period).max()
     stoch_k = 100 * ((df['Close'] - low_min) / (high_max - low_min))
@@ -47,12 +47,11 @@ def calculate_stochastic(df, k_period=14, d_period=3):
 
 
 def calculate_supertrend(df, period=10, multiplier=3):
-    """Расчет индикатора SuperTrend."""
+    """Расчет SuperTrend."""
     high = df['High']
     low = df['Low']
     close = df['Close']
 
-    # ATR calculation
     tr1 = high - low
     tr2 = (high - close.shift(1)).abs()
     tr3 = (low - close.shift(1)).abs()
@@ -88,18 +87,18 @@ def calculate_supertrend(df, period=10, multiplier=3):
 
 
 def analyze_market():
-    """Анализ рынка по алгоритму стратегии."""
+    """Анализ торговой стратегии."""
     try:
         df = yf.download(tickers=SYMBOL, period="2d", interval=INTERVAL, progress=False)
 
         if df.empty or len(df) < 200:
-            print("Недостаточно данных.")
+            print("Недостаточно свечей для анализа.")
             return
 
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Расчет показателей
+        # Индикаторы
         df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
         df['RSI'] = calculate_rsi(df['Close'], 14)
         df['STOCHk'], df['STOCHd'] = calculate_stochastic(df, 14, 3)
@@ -129,22 +128,23 @@ def analyze_market():
         if call_signal:
             msg = f"🚀 *СИГНАЛ: ВВЕРХ (CALL)*\n\n📊 Пара: {SYMBOL}\n⏱ Таймфрейм: {INTERVAL}\n💡 Экспирация: 10-15 мин\n📈 Цена: {curr['Close']:.5f}"
             send_telegram_message(msg)
-            print(f"[{pd.Timestamp.now()}] Сигнал CALL отправлен")
+            print(f"[{pd.Timestamp.now()}] Отправлен сигнал CALL")
         elif put_signal:
             msg = f"🔻 *СИГНАЛ: ВНИЗ (PUT)*\n\n📊 Пара: {SYMBOL}\n⏱ Таймфрейм: {INTERVAL}\n💡 Экспирация: 10-15 мин\n📉 Цена: {curr['Close']:.5f}"
             send_telegram_message(msg)
-            print(f"[{pd.Timestamp.now()}] Сигнал PUT отправлен")
+            print(f"[{pd.Timestamp.now()}] Отправлен сигнал PUT")
         else:
-            print(f"[{pd.Timestamp.now()}] Проверка завершена. Сигналов нет.")
+            print(f"[{pd.Timestamp.now()}] Проверка успешна. Сигналов нет.")
 
     except Exception as e:
         print(f"Ошибка во время анализа: {e}")
 
 
 if __name__ == "__main__":
-    send_telegram_message("🤖 *Бот запущен и готовит сигналы!*")
+    send_telegram_message("🤖 *Бот успешно запущен и анализирует рынок!*")
     while True:
         analyze_market()
         time.sleep(CHECK_INTERVAL)
+
 
 
