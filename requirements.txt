@@ -1,6 +1,3 @@
-requests
-pandas
-numpy
-yfinance
-
-
+aiogram>=3.4.0
+BinaryOptionsToolsV2>=0.2.12
+aiohttp>=3.9.0
